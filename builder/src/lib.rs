@@ -15,6 +15,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
             #name: Option<#ty>
         }
     });
+    let builder_impls = get_struct_fields(&input.data).map(|f| {
+        let name = &f.ident;
+        let ty = &f.ty;
+        quote_spanned! {f.span()=>
+            fn #name(&mut self, #name: #ty) -> &mut Self {
+                self.#name = Some(#name);
+                self
+            }
+        }
+    });
     let initial_fields = get_struct_fields(&input.data).map(|f| {
         let name = &f.ident;
         quote_spanned! {f.span()=>
@@ -32,6 +42,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         struct #builder_name {
             #(#builder_fields),*
+        }
+        impl #builder_name {
+            #(#builder_impls)*
         }
     };
 
