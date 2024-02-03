@@ -25,6 +25,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
     });
+    let builder_build_unwrap_fields = get_struct_fields(&input.data).map(|f| {
+        let name = &f.ident;
+        let error_msg = format!(
+            "Insufficient field: {}",
+            name.clone().map(|f| f.to_string()).unwrap_or_default()
+        );
+        quote_spanned! {f.span()=>
+            let Some(ref #name) = self.#name else { return Err(#error_msg.into()) };
+        }
+    });
+    let builder_build_field_names = get_struct_fields(&input.data).map(|f| {
+        let name = &f.ident;
+        quote_spanned! {f.span()=> #name: #name.clone() }
+    });
     let initial_fields = get_struct_fields(&input.data).map(|f| {
         let name = &f.ident;
         quote_spanned! {f.span()=>
@@ -45,6 +59,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         impl #builder_name {
             #(#builder_impls)*
+
+            pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+                #(#builder_build_unwrap_fields)*
+
+                Ok(#name {
+                    #(#builder_build_field_names),*
+                })
+            }
         }
     };
 
