@@ -1,8 +1,8 @@
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, quote_spanned, ToTokens};
 use syn::{
-    spanned::Spanned, Data, DeriveInput, Field, Fields, GenericArgument, LitStr, PathArguments,
-    Type, TypePath,
+    spanned::Spanned, Attribute, Data, DeriveInput, Error, Field, Fields, GenericArgument, LitStr,
+    PathArguments, Type, TypePath,
 };
 
 #[derive(Debug)]
@@ -290,7 +290,7 @@ impl Compile for VectorField {
 pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = input.ident;
     let builder_name = Ident::new(&format!("{}Builder", name), Span::call_site());
-    let fields = get_builder_fields(&input.data);
+    let fields = get_builder_fields(&input.data)?;
 
     let builder_fields = fields.iter().map(BuilderField::to_builder_field);
     let builder_impls = fields.iter().map(BuilderField::to_builder_impl);
@@ -324,42 +324,58 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     Ok(expanded)
 }
 
-fn get_builder_fields(data: &Data) -> Vec<BuilderField> {
+fn get_builder_fields(data: &Data) -> syn::Result<Vec<BuilderField>> {
     get_struct_fields(data)
         .map(|f| {
             let ty = &f.ty;
             let option = get_option_inner_type(ty);
-            let each = f
-                .attrs
-                .iter()
-                .filter(|attr| attr.path().is_ident("builder"))
-                .filter_map(|attr| {
-                    let mut each = None;
-                    let _ = attr.parse_nested_meta(|meta| {
-                        if meta.path.is_ident("each") {
-                            let value = meta.value();
-                            let s: Option<LitStr> = value.and_then(|v| v.parse()).ok();
-                            each = s;
-                            return Ok(());
-                        }
-                        Err(meta.error("Inert attribute only accepts `each`"))
-                    });
-                    each
-                })
-                .collect::<Vec<_>>()
-                .first()
-                .map(|s| s.clone());
+            let each_results = get_each_attributes(&f.attrs);
+            if let Err(err) = each_results {
+                return Err(err);
+            }
+            let each = each_results.unwrap().first().map(|s| s.clone());
 
-            if option.is_some() {
+            Ok(if option.is_some() {
                 BuilderField::option(f, &option.unwrap())
             } else if each.is_some() {
                 let inner = get_inner_type(ty).unwrap();
                 BuilderField::vec(f, &each.clone().unwrap().clone(), &inner)
             } else {
                 BuilderField::normal(f)
-            }
+            })
         })
-        .collect::<Vec<_>>()
+        .try_fold(vec![], |mut acc, res| match res {
+            Ok(field) => {
+                acc.push(field);
+                Ok(acc)
+            }
+            Err(err) => Err(err),
+        })
+}
+
+fn get_each_attributes(attrs: &[Attribute]) -> syn::Result<Vec<LitStr>> {
+    let mut rets = vec![];
+    for attr in attrs {
+        if attr.path().is_ident("builder") {
+            let _ = attr.parse_nested_meta(|meta| {
+                let error = Err(Error::new_spanned(
+                    attr.meta.clone(),
+                    r#"expected `builder(each = "...")`"#,
+                ));
+                if !meta.path.is_ident("each") {
+                    return error;
+                }
+                let value = meta.value();
+                let s: Option<LitStr> = value.and_then(|v| v.parse()).ok();
+                if let Some(s) = s {
+                    rets.push(s);
+                    return Ok(());
+                }
+                error
+            })?;
+        }
+    }
+    Ok(rets)
 }
 
 fn get_struct_fields(data: &Data) -> impl Iterator<Item = &Field> {
