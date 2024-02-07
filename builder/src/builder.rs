@@ -121,7 +121,7 @@ impl Compile for NormalField {
 
     fn field_type(&self) -> TokenStream {
         let ty = &self.field.ty;
-        quote! { Option<#ty> }
+        quote! { std::option::Option<#ty> }
     }
 
     fn arg_type(&self) -> TokenStream {
@@ -133,18 +133,18 @@ impl Compile for NormalField {
         let name = self.name();
         let error_msg = format!("Insufficient field: {}", name.to_string());
         quote! {
-            let Some(ref #name) = self.#name else { return Err(#error_msg.into()) };
+            let std::option::Option::Some(ref #name) = self.#name else { return std::result::Result::Err(#error_msg.into()) };
         }
     }
 
     fn default(&self) -> TokenStream {
-        quote! { None }
+        quote! { std::option::Option::None }
     }
 
     fn assignment(&self) -> TokenStream {
         let name = self.name();
         quote_spanned! {self.span()=>
-            self.#name = Some(#name);
+            self.#name = std::option::Option::Some(#name);
         }
     }
 
@@ -183,13 +183,13 @@ impl Compile for OptionField {
     }
 
     fn default(&self) -> TokenStream {
-        quote! { None }
+        quote! { std::option::Option::None }
     }
 
     fn assignment(&self) -> TokenStream {
         let name = self.name();
         quote_spanned! {self.span()=>
-            self.#name = Some(#name);
+            self.#name = std::option::Option::Some(#name);
         }
     }
 
@@ -312,10 +312,10 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         impl #builder_name {
             #(#builder_impls)*
 
-            pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error>> {
                 #(#builder_build_arrange_fields)*
 
-                Ok(#name {
+                std::result::Result::Ok(#name {
                     #(#builder_build_field_names),*
                 })
             }
