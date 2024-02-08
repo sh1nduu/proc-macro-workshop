@@ -5,19 +5,19 @@ use syn::{spanned::Spanned, Data, DataStruct, DeriveInput, Error, Field, Fields,
 /// `BuilderName` holds the identifiers for the target and the associated builder.
 struct BuilderName {
     /// The identifier of the target type for which the builder is created.
-    target_name: Ident,
-    /// The identifier of the builder structure associated with the target type.
-    builder_name: Ident,
+    target_ident: Ident,
+    /// The identifier of the builder struct associated with the target type.
+    builder_ident: Ident,
 }
 
 impl BuilderName {
     /// Parses the provided `DeriveInput` to construct a `BuilderName` instance.
     fn parse(input: &DeriveInput) -> Self {
-        let target_name = input.ident.clone();
-        let builder_name = format_ident!("{}Builder", target_name);
+        let target_ident = input.ident.clone();
+        let builder_ident = format_ident!("{}Builder", target_ident);
         Self {
-            target_name,
-            builder_name,
+            target_ident,
+            builder_ident,
         }
     }
 }
@@ -106,47 +106,47 @@ impl StructField {
 /// Generates a `TokenStream` representing the derived builder struct for a procedural macro.
 pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
     let builder = BuilderName::parse(&input);
-    let target_name = &builder.target_name;
-    let builder_name = &builder.builder_name;
+    let target_ident = &builder.target_ident;
+    let builder_ident = &builder.builder_ident;
     let struct_fields = StructFields::parse(&input)?;
     let builder_fields = struct_fields.builder_fields();
     let init_fields = struct_fields.init_fields();
     Ok(quote! {
-        impl #target_name {
-            pub fn builder() -> #builder_name {
-                #builder_name {
+        impl #target_ident {
+            pub fn builder() -> #builder_ident {
+                #builder_ident {
                     #init_fields
                 }
             }
         }
 
-        pub struct #builder_name {
+        pub struct #builder_ident {
             #builder_fields
         }
     })
 }
 
 #[cfg(test)]
-mod expand {
+mod tests {
     use super::*;
     use quote::ToTokens;
     use std::iter::zip;
     use syn::{parse_quote, DeriveInput};
 
     #[test]
-    fn builder_input_parses_struct_names() {
+    fn builder_name_generates_a_builder_identifier_from_a_struct() {
         let input: DeriveInput = parse_quote! {
             pub struct Command { }
         };
 
-        let builder_input = BuilderName::parse(&input);
+        let builder_name = BuilderName::parse(&input);
 
-        assert_eq!(builder_input.target_name, "Command");
-        assert_eq!(builder_input.builder_name, "CommandBuilder");
+        assert_eq!(builder_name.target_ident, "Command");
+        assert_eq!(builder_name.builder_ident, "CommandBuilder");
     }
 
     #[test]
-    fn struct_fields_parses_each_fields() -> Result<()> {
+    fn struct_fields_parses_each_fields_of_a_struct() -> Result<()> {
         let input: DeriveInput = parse_quote! {
             struct Command {
                 executable: String,
@@ -156,10 +156,10 @@ mod expand {
             }
         };
         let expectations = [
-            ["executable", "String"],
-            ["args", "Vec < String >"],
-            ["env", "Vec < String >"],
-            ["current_dir", "String"],
+            ["executable", &quote!(String).to_string()],
+            ["args", &quote!(Vec<String>).to_string()],
+            ["env", &quote!(Vec<String>).to_string()],
+            ["current_dir", &quote!(String).to_string()],
         ];
 
         let fields = StructFields::parse(&input)?;
@@ -169,7 +169,51 @@ mod expand {
             assert_eq!(field.name.to_string(), expectation[0]);
             assert_eq!(field.ty.into_token_stream().to_string(), expectation[1]);
         }
+        Ok(())
+    }
 
+    #[test]
+    fn struct_field_parses_a_name_and_a_type_of_a_field() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: String
+        };
+
+        let struct_field = StructField::parse(&field)?;
+
+        assert_eq!(struct_field.name.to_string(), "name");
+        assert_eq!(struct_field.ty.to_token_stream().to_string(), "String");
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_builder_field() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: String
+        };
+        let expected = quote! {
+            name: std::option::Option<String>,
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let builder_field = struct_field.builder_field();
+
+        assert_eq!(builder_field.to_string(), expected.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_field_with_initialization_value() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: String
+        };
+        let expected = quote! {
+            name: std::option::Option::None,
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let init_field = struct_field.init_field();
+
+        assert_eq!(init_field.to_string(), expected.to_string());
         Ok(())
     }
 }
