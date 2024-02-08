@@ -59,6 +59,12 @@ impl StructFields {
         let fields = self.fields.iter().map(StructField::init_field);
         quote! { #(#fields)* }
     }
+
+    /// Generates a `TokenStream` for the setter methods of the builder.
+    fn setter_methods(&self) -> TokenStream {
+        let methods = self.fields.iter().map(StructField::setter_method);
+        quote! { #(#methods)* }
+    }
 }
 
 /// `StructField` holds metadata for a field of the provided struct.
@@ -101,6 +107,18 @@ impl StructField {
             #name: std::option::Option::None,
         }
     }
+
+    /// Generates a `TokenStream` for a setter method of the struct.
+    fn setter_method(&self) -> TokenStream {
+        let name = &self.name;
+        let ty = &self.ty;
+        quote_spanned! {self.span=>
+            pub fn #name(&mut self, #name: #ty) -> &mut Self {
+                self.#name = std::option::Option::Some(#name);
+                self
+            }
+        }
+    }
 }
 
 /// Generates a `TokenStream` representing the derived builder struct for a procedural macro.
@@ -111,6 +129,7 @@ pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
     let struct_fields = StructFields::parse(&input)?;
     let builder_fields = struct_fields.builder_fields();
     let init_fields = struct_fields.init_fields();
+    let setter_methods = struct_fields.setter_methods();
     Ok(quote! {
         impl #target_ident {
             pub fn builder() -> #builder_ident {
@@ -122,6 +141,10 @@ pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
 
         pub struct #builder_ident {
             #builder_fields
+        }
+
+        impl #builder_ident {
+            #setter_methods
         }
     })
 }
@@ -214,6 +237,25 @@ mod tests {
         let init_field = struct_field.init_field();
 
         assert_eq!(init_field.to_string(), expected.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_setter_method() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: String
+        };
+        let expected = quote! {
+            pub fn name(&mut self, name: String) -> &mut Self {
+                self.name = std::option::Option::Some(name);
+                self
+            }
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let setter_method = struct_field.setter_method();
+
+        assert_eq!(setter_method.to_string(), expected.to_string());
         Ok(())
     }
 }
