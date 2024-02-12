@@ -1,6 +1,9 @@
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{format_ident, quote, quote_spanned};
-use syn::{spanned::Spanned, Data, DataStruct, DeriveInput, Error, Field, Fields, Result, Type};
+use quote::{format_ident, quote, quote_spanned, ToTokens};
+use syn::{
+    spanned::Spanned, AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Error, Field,
+    Fields, GenericArgument, Path, PathArguments, PathSegment, Result, Type, TypePath,
+};
 
 /// `BuilderName` holds the identifiers for the target and the associated builder.
 struct BuilderName {
@@ -61,12 +64,60 @@ impl StructFields {
     }
 }
 
+/// `FieldType` holds metadata for some specific type, e.g. `Option<T>`.
+#[derive(PartialEq)]
+enum FieldType {
+    Normal(Type),
+    Option(Type, Type),
+}
+
+impl FieldType {
+    fn parse(ty: &Type) -> Self {
+        let option_inner = get_inner_type("Option", ty);
+        if option_inner.is_some() {
+            Self::Option(ty.clone(), option_inner.unwrap())
+        } else {
+            Self::Normal(ty.clone())
+        }
+    }
+}
+
+fn get_inner_type(wrapper: &str, ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Path(TypePath {
+            path: Path { segments, .. },
+            ..
+        }) => match segments.first() {
+            Some(PathSegment {
+                ident,
+                arguments:
+                    PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
+                ..
+            }) if ident == wrapper => match args.first() {
+                Some(GenericArgument::Type(inner)) => Some(inner.clone()),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+impl ToTokens for FieldType {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            Self::Normal(ty) => ty.to_tokens(tokens),
+            Self::Option(ty, _) => ty.to_tokens(tokens),
+        };
+    }
+}
+
 /// `StructField` holds metadata for a field of the provided struct.
 struct StructField {
     /// The name of the field.
     name: Ident,
     /// The type of the field.
-    ty: Type,
+    ty: FieldType,
     /// The location of the field in the source code.
     span: Span,
 }
@@ -80,7 +131,7 @@ impl StructField {
         let Some(name) = f.ident.clone() else {
             return Err(Error::new_spanned(f, "Missing field name"));
         };
-        let ty = f.ty.clone();
+        let ty = FieldType::parse(&f.ty);
         let span = f.span();
         Ok(Self { name, ty, span })
     }
@@ -88,25 +139,37 @@ impl StructField {
     /// Generates a `TokenStream` of the declaration for the builder struct field.
     fn builder_field(&self) -> TokenStream {
         let name = &self.name;
-        let ty = &self.ty;
-        quote_spanned! {self.span=>
-            #name: std::option::Option<#ty>,
+        match &self.ty {
+            FieldType::Normal(ty) => quote_spanned! {self.span=>
+                #name: std::option::Option<#ty>,
+            },
+            FieldType::Option(_, inner) => quote_spanned! {self.span=>
+                #name: std::option::Option<#inner>,
+            },
         }
     }
 
     /// Generates a `TokenStream` for a setter method of the struct.
     fn setter_method(&self) -> TokenStream {
         let name = &self.name;
-        let ty = &self.ty;
-        quote_spanned! {self.span=>
-            pub fn #name(&mut self, #name: #ty) -> &mut Self {
-                self.#name = std::option::Option::Some(#name);
-                self
-            }
+        match &self.ty {
+            FieldType::Normal(ty) => quote_spanned! {self.span=>
+                pub fn #name(&mut self, #name: #ty) -> &mut Self {
+                    self.#name = std::option::Option::Some(#name);
+                    self
+                }
+            },
+            FieldType::Option(_, inner) => quote_spanned! {self.span=>
+                pub fn #name(&mut self, #name: #inner) -> &mut Self {
+                    self.#name = std::option::Option::Some(#name);
+                    self
+                }
+            },
         }
     }
 }
 
+/// Generates a `TokenStream` representing the derived builder method for the given struct.
 fn expand_builder_method(builder_name: &BuilderName, struct_fields: &StructFields) -> TokenStream {
     let init_fields = struct_fields.fields.iter().map(|f| {
         let name = &f.name;
@@ -125,13 +188,19 @@ fn expand_builder_method(builder_name: &BuilderName, struct_fields: &StructField
     }
 }
 
+/// Generates a `TokenStream` representing the derived build method for the builder struct.
 fn expand_build_method(builder_name: &BuilderName, struct_fields: &StructFields) -> TokenStream {
     let prepares = struct_fields.fields.iter().map(|f| {
         let name = &f.name;
-        quote_spanned! {f.span=>
-            let std::option::Option::Some(ref #name) = self.#name else {
-                return std::result::Result::Err("Insufficient field".to_string().into());
-            };
+        match &f.ty {
+            FieldType::Normal(_) => quote_spanned! {f.span=>
+                let std::option::Option::Some(ref #name) = self.#name else {
+                    return std::result::Result::Err("Insufficient field".to_string().into());
+                };
+            },
+            FieldType::Option(_, _) => quote_spanned! {f.span=>
+                let #name = &self.#name;
+            },
         }
     });
     let fields = struct_fields.fields.iter().map(|f| {
@@ -256,6 +325,7 @@ mod tests {
             struct Command {
                 executable: String,
                 env: Vec<String>,
+                current_dir: Option<String>,
             }
         };
         let builder_name = BuilderName::parse(&input);
@@ -271,7 +341,12 @@ mod tests {
                 let std::option::Option::Some(ref env) = self.env else {
                     return std::result::Result::Err("Insufficient field".to_string().into());
                 };
-                std::result::Result::Ok(Command { executable: executable.clone(), env: env.clone() })
+                let current_dir = &self.current_dir;
+                std::result::Result::Ok(Command {
+                    executable: executable.clone(),
+                    env: env.clone(),
+                    current_dir: current_dir.clone()
+                })
             }
         };
         assert_eq!(build_method.to_string(), expected.to_string());
@@ -287,14 +362,52 @@ mod tests {
         let struct_field = StructField::parse(&field)?;
 
         assert_eq!(struct_field.name.to_string(), "name");
-        assert_eq!(struct_field.ty.to_token_stream().to_string(), "String");
+        assert_eq!(
+            struct_field.ty.to_token_stream().to_string(),
+            quote!(String).to_string()
+        );
+        assert!(matches!(struct_field.ty, FieldType::Normal(_)));
         Ok(())
     }
 
     #[test]
-    fn struct_field_generates_a_builder_field() -> Result<()> {
+    fn struct_field_parses_an_option_type() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: Option<String>
+        };
+
+        let struct_field = StructField::parse(&field)?;
+
+        assert_eq!(struct_field.name.to_string(), "name");
+        assert_eq!(
+            struct_field.ty.to_token_stream().to_string(),
+            quote!(Option<String>).to_string()
+        );
+        assert!(matches!(struct_field.ty, FieldType::Option(_, _)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_optional_builder_field() -> Result<()> {
         let field: Field = parse_quote! {
             pub name: String
+        };
+        let expected = quote! {
+            name: std::option::Option<String>,
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let builder_field = struct_field.builder_field();
+
+        assert_eq!(builder_field.to_string(), expected.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_optional_builder_field_when_option_type_is_given() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: Option<String>
         };
         let expected = quote! {
             name: std::option::Option<String>,
@@ -324,5 +437,49 @@ mod tests {
 
         assert_eq!(setter_method.to_string(), expected.to_string());
         Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_setter_method_which_takes_non_optional_type_if_option_type_is_given(
+    ) -> Result<()> {
+        let field: Field = parse_quote! {
+            pub name: Option<String>
+        };
+        let expected = quote! {
+            pub fn name(&mut self, name: String) -> &mut Self {
+                self.name = std::option::Option::Some(name);
+                self
+            }
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let setter_method = struct_field.setter_method();
+
+        assert_eq!(setter_method.to_string(), expected.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn field_type_parses_normal_tokens() {
+        let ty: Type = parse_quote! {
+            String
+        };
+        let ft = FieldType::parse(&ty);
+
+        let token = ft.to_token_stream().to_string();
+
+        assert_eq!(token, quote!(String).to_string());
+    }
+
+    #[test]
+    fn field_type_parses_option_tokens() {
+        let ty: Type = parse_quote! {
+            Option<String>
+        };
+        let ft = FieldType::parse(&ty);
+
+        let token = ft.to_token_stream().to_string();
+
+        assert_eq!(token, quote!(Option<String>).to_string());
     }
 }
