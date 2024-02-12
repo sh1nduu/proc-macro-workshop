@@ -65,6 +65,32 @@ impl StructFields {
         let methods = self.fields.iter().map(StructField::setter_method);
         quote! { #(#methods)* }
     }
+
+    fn build_method(&self, builder_name: &BuilderName) -> TokenStream {
+        let prepares = self.fields.iter().map(|f| {
+            let name = &f.name;
+            quote_spanned! {f.span=> 
+                let std::option::Option::Some(ref #name) = self.#name else { return std::result::Result::Err("Insufficient field".to_string().into()); };
+            }
+        });
+        let fields = self.fields.iter().map(|f| {
+            let name = &f.name;
+            quote_spanned! {f.span=>
+                #name: #name.clone()
+            }
+        });
+        let target_ident = &builder_name.target_ident;
+
+        quote! {
+            pub fn build(&mut self) -> std::result::Result<#target_ident, std::boxed::Box<dyn std::error::Error>> {
+                #(#prepares)*
+                
+                std::result::Result::Ok(#target_ident {
+                    #(#fields),*
+                })
+            }
+        }
+    }
 }
 
 /// `StructField` holds metadata for a field of the provided struct.
@@ -130,6 +156,7 @@ pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
     let builder_fields = struct_fields.builder_fields();
     let init_fields = struct_fields.init_fields();
     let setter_methods = struct_fields.setter_methods();
+    let build_method = struct_fields.build_method(&builder);
     Ok(quote! {
         impl #target_ident {
             pub fn builder() -> #builder_ident {
@@ -145,6 +172,7 @@ pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
 
         impl #builder_ident {
             #setter_methods
+            #build_method
         }
     })
 }
@@ -192,6 +220,29 @@ mod tests {
             assert_eq!(field.name.to_string(), expectation[0]);
             assert_eq!(field.ty.into_token_stream().to_string(), expectation[1]);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn struct_fields_generates_a_build_method() -> Result<()> {
+        let input: DeriveInput = parse_quote! {
+            struct Command {
+                executable: String,
+                env: Vec<String>,
+            }
+        };
+        let builder_name = BuilderName::parse(&input);
+        let fields = StructFields::parse(&input)?;
+        let expected = quote! {
+            pub fn build(&mut self) -> std::result::Result<Command, std::boxed::Box<dyn std::error::Error>> {
+                let std::option::Option::Some(ref executable) = self.executable else { return std::result::Result::Err("Insufficient field".to_string().into()); };
+                let std::option::Option::Some(ref env) = self.env else { return std::result::Result::Err("Insufficient field".to_string().into()); };
+
+                std::result::Result::Ok(Command { executable: executable.clone(), env: env.clone() })
+            }
+        };
+
+        assert_eq!(fields.build_method(&builder_name).to_string(), expected.to_string());
         Ok(())
     }
 
