@@ -315,321 +315,340 @@ mod tests {
     use std::iter::zip;
     use syn::{parse_quote, DeriveInput};
 
-    #[test]
-    fn builder_name_generates_a_builder_identifier_from_a_struct() {
-        let input: DeriveInput = parse_quote! {
-            pub struct Command { }
-        };
+    mod builder_name {
+        use super::*;
 
-        let builder_name = BuilderName::parse(&input);
+        #[test]
+        fn generates_a_builder_identifier_from_a_struct() {
+            let input: DeriveInput = parse_quote! {
+                pub struct Command { }
+            };
 
-        assert_eq!(builder_name.target_ident, "Command");
-        assert_eq!(builder_name.builder_ident, "CommandBuilder");
-    }
+            let builder_name = BuilderName::parse(&input);
 
-    #[test]
-    fn struct_fields_parses_each_fields_of_a_struct() -> Result<()> {
-        let input: DeriveInput = parse_quote! {
-            struct Command {
-                executable: String,
-                args: Vec<String>,
-                env: Vec<String>,
-                current_dir: String,
-            }
-        };
-        let expectations = [
-            ["executable", &quote!(String).to_string()],
-            ["args", &quote!(Vec<String>).to_string()],
-            ["env", &quote!(Vec<String>).to_string()],
-            ["current_dir", &quote!(String).to_string()],
-        ];
-
-        let fields = StructFields::parse(&input)?;
-
-        assert_eq!(fields.fields.len(), 4);
-        for (field, expectation) in zip(fields.fields, expectations) {
-            assert_eq!(field.name.to_string(), expectation[0]);
-            assert_eq!(field.ty.into_token_stream().to_string(), expectation[1]);
+            assert_eq!(builder_name.target_ident, "Command");
+            assert_eq!(builder_name.builder_ident, "CommandBuilder");
         }
-        Ok(())
     }
 
-    #[test]
-    fn expand_builder_method_generates_a_builder_method() -> Result<()> {
-        let input: DeriveInput = parse_quote! {
-            struct Command {
-                executable: String,
-                #[builder(each = "arg")]
-                args: Vec<String>,
-                env: Vec<String>,
-                current_dir: Option<String>
-            }
-        };
-        let builder_name = BuilderName::parse(&input);
-        let fields = StructFields::parse(&input)?;
+    mod struct_fields {
+        use super::*;
 
-        let builder_method = expand_builder_method(&builder_name, &fields);
-
-        let expected = quote! {
-            pub fn builder() -> CommandBuilder {
-                CommandBuilder {
-                    executable: std::option::Option::None,
-                    args: std::vec::Vec::new(),
-                    env: std::vec::Vec::new(),
-                    current_dir: std::option::Option::None,
+        #[test]
+        fn parses_each_fields_of_a_struct() -> Result<()> {
+            let input: DeriveInput = parse_quote! {
+                struct Command {
+                    executable: String,
+                    args: Vec<String>,
+                    env: Vec<String>,
+                    current_dir: String,
                 }
+            };
+            let expectations = [
+                ["executable", &quote!(String).to_string()],
+                ["args", &quote!(Vec<String>).to_string()],
+                ["env", &quote!(Vec<String>).to_string()],
+                ["current_dir", &quote!(String).to_string()],
+            ];
+
+            let fields = StructFields::parse(&input)?;
+
+            assert_eq!(fields.fields.len(), 4);
+            for (field, expectation) in zip(fields.fields, expectations) {
+                assert_eq!(field.name.to_string(), expectation[0]);
+                assert_eq!(field.ty.into_token_stream().to_string(), expectation[1]);
             }
-        };
-        assert_eq!(builder_method.to_string(), expected.to_string());
-        Ok(())
+            Ok(())
+        }
     }
 
-    #[test]
-    fn expand_build_method_generates_a_build_method() -> Result<()> {
-        let input: DeriveInput = parse_quote! {
-            struct Command {
-                executable: String,
-                #[builder(each = "arg")]
-                args: Vec<String>,
-                env: Vec<String>,
-                current_dir: Option<String>,
-            }
-        };
-        let builder_name = BuilderName::parse(&input);
-        let fields = StructFields::parse(&input)?;
+    mod expand_builder_method {
+        use super::*;
 
-        let build_method = expand_build_method(&builder_name, &fields);
+        #[test]
+        fn generates_a_builder_method() -> Result<()> {
+            let input: DeriveInput = parse_quote! {
+                struct Command {
+                    executable: String,
+                    #[builder(each = "arg")]
+                    args: Vec<String>,
+                    env: Vec<String>,
+                    current_dir: Option<String>
+                }
+            };
+            let builder_name = BuilderName::parse(&input);
+            let fields = StructFields::parse(&input)?;
 
-        let expected = quote! {
-            pub fn build(&mut self) -> std::result::Result<Command, std::boxed::Box<dyn std::error::Error>> {
-                let std::option::Option::Some(ref executable) = self.executable else {
-                    return std::result::Result::Err("Insufficient field".to_string().into());
-                };
-                let args = &self.args;
-                let env = &self.env;
-                let current_dir = &self.current_dir;
-                std::result::Result::Ok(Command {
-                    executable: executable.clone(),
-                    args: args.clone(),
-                    env: env.clone(),
-                    current_dir: current_dir.clone()
-                })
-            }
-        };
-        assert_eq!(build_method.to_string(), expected.to_string());
-        Ok(())
+            let builder_method = expand_builder_method(&builder_name, &fields);
+
+            let expected = quote! {
+                pub fn builder() -> CommandBuilder {
+                    CommandBuilder {
+                        executable: std::option::Option::None,
+                        args: std::vec::Vec::new(),
+                        env: std::vec::Vec::new(),
+                        current_dir: std::option::Option::None,
+                    }
+                }
+            };
+            assert_eq!(builder_method.to_string(), expected.to_string());
+            Ok(())
+        }
     }
 
-    #[test]
-    fn struct_field_parses_a_name_and_a_type_of_a_field() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub name: String
-        };
+    mod expand_build_method {
+        use super::*;
 
-        let struct_field = StructField::parse(&field)?;
+        #[test]
+        fn generates_a_build_method() -> Result<()> {
+            let input: DeriveInput = parse_quote! {
+                struct Command {
+                    executable: String,
+                    #[builder(each = "arg")]
+                    args: Vec<String>,
+                    env: Vec<String>,
+                    current_dir: Option<String>,
+                }
+            };
+            let builder_name = BuilderName::parse(&input);
+            let fields = StructFields::parse(&input)?;
 
-        assert_eq!(struct_field.name.to_string(), "name");
-        assert_eq!(
-            struct_field.ty.to_token_stream().to_string(),
-            quote!(String).to_string()
-        );
-        assert!(matches!(struct_field.ty, FieldType::Normal(_)));
-        Ok(())
+            let build_method = expand_build_method(&builder_name, &fields);
+
+            let expected = quote! {
+                pub fn build(&mut self) -> std::result::Result<Command, std::boxed::Box<dyn std::error::Error>> {
+                    let std::option::Option::Some(ref executable) = self.executable else {
+                        return std::result::Result::Err("Insufficient field".to_string().into());
+                    };
+                    let args = &self.args;
+                    let env = &self.env;
+                    let current_dir = &self.current_dir;
+                    std::result::Result::Ok(Command {
+                        executable: executable.clone(),
+                        args: args.clone(),
+                        env: env.clone(),
+                        current_dir: current_dir.clone()
+                    })
+                }
+            };
+            assert_eq!(build_method.to_string(), expected.to_string());
+            Ok(())
+        }
     }
 
-    #[test]
-    fn struct_field_parses_an_option_type() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub name: Option<String>
-        };
+    mod struct_field {
+        use super::*;
 
-        let struct_field = StructField::parse(&field)?;
+        #[test]
+        fn parses_a_name_and_a_type_of_a_field() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub name: String
+            };
 
-        assert_eq!(struct_field.name.to_string(), "name");
-        assert_eq!(
-            struct_field.ty.to_token_stream().to_string(),
-            quote!(Option<String>).to_string()
-        );
-        assert!(matches!(struct_field.ty, FieldType::Option(_, _)));
+            let struct_field = StructField::parse(&field)?;
 
-        Ok(())
-    }
+            assert_eq!(struct_field.name.to_string(), "name");
+            assert_eq!(
+                struct_field.ty.to_token_stream().to_string(),
+                quote!(String).to_string()
+            );
+            assert!(matches!(struct_field.ty, FieldType::Normal(_)));
+            Ok(())
+        }
 
-    #[test]
-    fn struct_field_parses_a_vector_field() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub names: Vec<String>
-        };
+        #[test]
+        fn parses_an_option_type() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub name: Option<String>
+            };
 
-        let struct_field = StructField::parse(&field)?;
-        assert_eq!(struct_field.name.to_string(), "names");
-        assert_eq!(
-            struct_field.ty.to_token_stream().to_string(),
-            quote!(Vec<String>).to_string()
-        );
-        assert!(matches!(struct_field.ty, FieldType::Vec(_, _)));
+            let struct_field = StructField::parse(&field)?;
 
-        Ok(())
-    }
+            assert_eq!(struct_field.name.to_string(), "name");
+            assert_eq!(
+                struct_field.ty.to_token_stream().to_string(),
+                quote!(Option<String>).to_string()
+            );
+            assert!(matches!(struct_field.ty, FieldType::Option(_, _)));
 
-    #[test]
-    fn struct_field_parses_a_vector_field_with_a_each_attribute() -> Result<()> {
-        let field: Field = parse_quote! {
-            #[builder(each = "name")]
-            pub names: Vec<String>
-        };
+            Ok(())
+        }
 
-        let struct_field = StructField::parse(&field)?;
-        assert_eq!(struct_field.name.to_string(), "names");
-        assert_eq!(
-            struct_field.ty.to_token_stream().to_string(),
-            quote!(Vec<String>).to_string()
-        );
-        assert!(matches!(struct_field.ty, FieldType::VecEach(_, _, _)));
+        #[test]
+        fn parses_a_vector_field() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub names: Vec<String>
+            };
 
-        Ok(())
-    }
+            let struct_field = StructField::parse(&field)?;
+            assert_eq!(struct_field.name.to_string(), "names");
+            assert_eq!(
+                struct_field.ty.to_token_stream().to_string(),
+                quote!(Vec<String>).to_string()
+            );
+            assert!(matches!(struct_field.ty, FieldType::Vec(_, _)));
 
-    #[test]
-    fn struct_field_generates_a_optional_builder_field() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub name: String
-        };
-        let expected = quote! {
-            name: std::option::Option<String>,
-        };
-        let struct_field = StructField::parse(&field)?;
+            Ok(())
+        }
 
-        let builder_field = struct_field.builder_field();
+        #[test]
+        fn parses_a_vector_field_with_a_each_attribute() -> Result<()> {
+            let field: Field = parse_quote! {
+                #[builder(each = "name")]
+                pub names: Vec<String>
+            };
 
-        assert_eq!(builder_field.to_string(), expected.to_string());
-        Ok(())
-    }
+            let struct_field = StructField::parse(&field)?;
+            assert_eq!(struct_field.name.to_string(), "names");
+            assert_eq!(
+                struct_field.ty.to_token_stream().to_string(),
+                quote!(Vec<String>).to_string()
+            );
+            assert!(matches!(struct_field.ty, FieldType::VecEach(_, _, _)));
 
-    #[test]
-    fn struct_field_generates_a_optional_builder_field_when_option_type_is_given() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub name: Option<String>
-        };
-        let expected = quote! {
-            name: std::option::Option<String>,
-        };
-        let struct_field = StructField::parse(&field)?;
+            Ok(())
+        }
 
-        let builder_field = struct_field.builder_field();
+        #[test]
+        fn generates_a_optional_builder_field() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub name: String
+            };
+            let expected = quote! {
+                name: std::option::Option<String>,
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(builder_field.to_string(), expected.to_string());
-        Ok(())
-    }
+            let builder_field = struct_field.builder_field();
 
-    #[test]
-    fn struct_field_generates_a_vector_builder_field_when_vec_is_given() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub names: Vec<String>
-        };
-        let expected = quote! {
-            names: std::vec::Vec<String>,
-        };
-        let struct_field = StructField::parse(&field)?;
+            assert_eq!(builder_field.to_string(), expected.to_string());
+            Ok(())
+        }
 
-        let builder_field = struct_field.builder_field();
+        #[test]
+        fn generates_a_optional_builder_field_when_option_type_is_given() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub name: Option<String>
+            };
+            let expected = quote! {
+                name: std::option::Option<String>,
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(builder_field.to_string(), expected.to_string());
-        Ok(())
-    }
+            let builder_field = struct_field.builder_field();
 
-    #[test]
-    fn struct_field_generates_a_vector_builder_field_with_each_name() -> Result<()> {
-        let field: Field = parse_quote! {
-            #[builder(each = "name")]
-            pub names: Vec<String>
-        };
-        let expected = quote! {
-            names: std::vec::Vec<String>,
-        };
-        let struct_field = StructField::parse(&field)?;
+            assert_eq!(builder_field.to_string(), expected.to_string());
+            Ok(())
+        }
 
-        let builder_field = struct_field.builder_field();
+        #[test]
+        fn generates_a_vector_builder_field_when_vec_is_given() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub names: Vec<String>
+            };
+            let expected = quote! {
+                names: std::vec::Vec<String>,
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(builder_field.to_string(), expected.to_string());
-        Ok(())
-    }
+            let builder_field = struct_field.builder_field();
 
-    #[test]
-    fn struct_field_generates_a_setter() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub name: String
-        };
-        let expected = quote! {
-            pub fn name(&mut self, name: String) -> &mut Self {
-                self.name = std::option::Option::Some(name);
-                self
-            }
-        };
-        let struct_field = StructField::parse(&field)?;
+            assert_eq!(builder_field.to_string(), expected.to_string());
+            Ok(())
+        }
 
-        let setter_method = struct_field.setter_method();
+        #[test]
+        fn generates_a_vector_builder_field_with_each_name() -> Result<()> {
+            let field: Field = parse_quote! {
+                #[builder(each = "name")]
+                pub names: Vec<String>
+            };
+            let expected = quote! {
+                names: std::vec::Vec<String>,
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(setter_method.to_string(), expected.to_string());
-        Ok(())
-    }
+            let builder_field = struct_field.builder_field();
 
-    #[test]
-    fn struct_field_generates_a_setter_which_takes_a_inner_type_of_the_option_field() -> Result<()>
-    {
-        let field: Field = parse_quote! {
-            pub name: Option<String>
-        };
-        let expected = quote! {
-            pub fn name(&mut self, name: String) -> &mut Self {
-                self.name = std::option::Option::Some(name);
-                self
-            }
-        };
-        let struct_field = StructField::parse(&field)?;
+            assert_eq!(builder_field.to_string(), expected.to_string());
+            Ok(())
+        }
 
-        let setter_method = struct_field.setter_method();
+        #[test]
+        fn generates_a_setter() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub name: String
+            };
+            let expected = quote! {
+                pub fn name(&mut self, name: String) -> &mut Self {
+                    self.name = std::option::Option::Some(name);
+                    self
+                }
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(setter_method.to_string(), expected.to_string());
-        Ok(())
-    }
+            let setter_method = struct_field.setter_method();
 
-    #[test]
-    fn struct_field_generates_a_setter_which_takes_vec_type_for_vec_field() -> Result<()> {
-        let field: Field = parse_quote! {
-            pub names: Vec<String>
-        };
-        let expected = quote! {
-            pub fn names(&mut self, names: std::vec::Vec<String>) -> &mut Self {
-                self.names = names;
-                self
-            }
-        };
-        let struct_field = StructField::parse(&field)?;
+            assert_eq!(setter_method.to_string(), expected.to_string());
+            Ok(())
+        }
 
-        let setter_method = struct_field.setter_method();
+        #[test]
+        fn generates_a_setter_which_takes_a_inner_type_of_the_option_field() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub name: Option<String>
+            };
+            let expected = quote! {
+                pub fn name(&mut self, name: String) -> &mut Self {
+                    self.name = std::option::Option::Some(name);
+                    self
+                }
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(setter_method.to_string(), expected.to_string());
-        Ok(())
-    }
+            let setter_method = struct_field.setter_method();
 
-    #[test]
-    fn struct_field_generates_a_setter_which_takes_a_inner_type_of_the_vec_field() -> Result<()> {
-        let field: Field = parse_quote! {
-            #[builder(each = "name")]
-            pub names: Vec<String>
-        };
-        let expected = quote! {
-            pub fn name(&mut self, name: String) -> &mut Self {
-                self.names.push(name);
-                self
-            }
-        };
-        let struct_field = StructField::parse(&field)?;
+            assert_eq!(setter_method.to_string(), expected.to_string());
+            Ok(())
+        }
 
-        let setter_method = struct_field.setter_method();
+        #[test]
+        fn generates_a_setter_which_takes_vec_type_for_vec_field() -> Result<()> {
+            let field: Field = parse_quote! {
+                pub names: Vec<String>
+            };
+            let expected = quote! {
+                pub fn names(&mut self, names: std::vec::Vec<String>) -> &mut Self {
+                    self.names = names;
+                    self
+                }
+            };
+            let struct_field = StructField::parse(&field)?;
 
-        assert_eq!(setter_method.to_string(), expected.to_string());
-        Ok(())
+            let setter_method = struct_field.setter_method();
+
+            assert_eq!(setter_method.to_string(), expected.to_string());
+            Ok(())
+        }
+
+        #[test]
+        fn generates_a_setter_which_takes_a_inner_type_of_the_vec_field() -> Result<()> {
+            let field: Field = parse_quote! {
+                #[builder(each = "name")]
+                pub names: Vec<String>
+            };
+            let expected = quote! {
+                pub fn name(&mut self, name: String) -> &mut Self {
+                    self.names.push(name);
+                    self
+                }
+            };
+            let struct_field = StructField::parse(&field)?;
+
+            let setter_method = struct_field.setter_method();
+
+            assert_eq!(setter_method.to_string(), expected.to_string());
+            Ok(())
+        }
     }
 }
