@@ -1,8 +1,9 @@
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned, ToTokens};
 use syn::{
-    spanned::Spanned, AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Error, Field,
-    Fields, GenericArgument, Path, PathArguments, PathSegment, Result, Type, TypePath,
+    spanned::Spanned, AngleBracketedGenericArguments, Attribute, Data, DataStruct, DeriveInput,
+    Error, Field, Fields, GenericArgument, LitStr, Path, PathArguments, PathSegment, Result, Type,
+    TypePath,
 };
 
 /// `BuilderName` holds the identifiers for the target and the associated builder.
@@ -69,16 +70,24 @@ impl StructFields {
 enum FieldType {
     Normal(Type),
     Option(Type, Type),
+    Vec(Type, Type),
+    VecEach(Type, Type, Ident),
 }
 
 impl FieldType {
-    fn parse(ty: &Type) -> Self {
+    fn parse(ty: &Type, attrs: &[Attribute]) -> Result<Self> {
         let option_inner = get_inner_type("Option", ty);
         if option_inner.is_some() {
-            Self::Option(ty.clone(), option_inner.unwrap())
-        } else {
-            Self::Normal(ty.clone())
+            return Ok(Self::Option(ty.clone(), option_inner.unwrap()));
         }
+        let vec_inner = get_inner_type("Vec", ty);
+        if vec_inner.is_some() {
+            if let Some(ident) = parse_each_ident(&attrs)? {
+                return Ok(Self::VecEach(ty.clone(), vec_inner.unwrap(), ident));
+            }
+            return Ok(Self::Vec(ty.clone(), vec_inner.unwrap()));
+        }
+        Ok(Self::Normal(ty.clone()))
     }
 }
 
@@ -103,11 +112,41 @@ fn get_inner_type(wrapper: &str, ty: &Type) -> Option<Type> {
     }
 }
 
+fn parse_each_ident(attrs: &[Attribute]) -> Result<Option<Ident>> {
+    match attrs.first() {
+        Some(attr) if attr.path().is_ident("builder") => {
+            let mut each_ident = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if !meta.path.is_ident("each") {
+                    return Err(Error::new_spanned(
+                        attr.meta.clone(),
+                        r#"expected `builder(each = "...")`"#,
+                    ));
+                }
+                each_ident = meta
+                    .value()
+                    .and_then(|v| v.parse::<LitStr>())
+                    .map(|lit| {
+                        let span = lit.span();
+                        let name = lit.to_token_stream().to_string().replace('"', "");
+                        Ident::new(&name, span)
+                    })
+                    .ok();
+                Ok(())
+            })?;
+            Ok(each_ident)
+        }
+        _ => Ok(None),
+    }
+}
+
 impl ToTokens for FieldType {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         match self {
             Self::Normal(ty) => ty.to_tokens(tokens),
             Self::Option(ty, _) => ty.to_tokens(tokens),
+            Self::Vec(ty, _) => ty.to_tokens(tokens),
+            Self::VecEach(ty, _, _) => ty.to_tokens(tokens),
         };
     }
 }
@@ -131,7 +170,7 @@ impl StructField {
         let Some(name) = f.ident.clone() else {
             return Err(Error::new_spanned(f, "Missing field name"));
         };
-        let ty = FieldType::parse(&f.ty);
+        let ty = FieldType::parse(&f.ty, &f.attrs)?;
         let span = f.span();
         Ok(Self { name, ty, span })
     }
@@ -140,12 +179,14 @@ impl StructField {
     fn builder_field(&self) -> TokenStream {
         let name = &self.name;
         match &self.ty {
-            FieldType::Normal(ty) => quote_spanned! {self.span=>
+            FieldType::Normal(ty) | FieldType::Option(_, ty) => quote_spanned! {self.span=>
                 #name: std::option::Option<#ty>,
             },
-            FieldType::Option(_, inner) => quote_spanned! {self.span=>
-                #name: std::option::Option<#inner>,
-            },
+            FieldType::Vec(_, inner) | FieldType::VecEach(_, inner, _) => {
+                quote_spanned! {self.span=>
+                    #name: std::vec::Vec<#inner>,
+                }
+            }
         }
     }
 
@@ -165,6 +206,18 @@ impl StructField {
                     self
                 }
             },
+            FieldType::Vec(_, inner) => quote_spanned! {self.span=>
+                pub fn #name(&mut self, #name: std::vec::Vec<#inner>) -> &mut Self {
+                    self.#name = #name;
+                    self
+                }
+            },
+            FieldType::VecEach(_, inner, each) => quote_spanned! {self.span=>
+                pub fn #each(&mut self, #each: #inner) -> &mut Self {
+                    self.#name.push(#each);
+                    self
+                }
+            },
         }
     }
 }
@@ -173,8 +226,13 @@ impl StructField {
 fn expand_builder_method(builder_name: &BuilderName, struct_fields: &StructFields) -> TokenStream {
     let init_fields = struct_fields.fields.iter().map(|f| {
         let name = &f.name;
-        quote_spanned! {f.span=>
-            #name: std::option::Option::None,
+        match &f.ty {
+            FieldType::Normal(_) | FieldType::Option(_, _) => quote_spanned! {f.span=>
+                #name: std::option::Option::None,
+            },
+            FieldType::Vec(_, _) | FieldType::VecEach(_, _, _) => quote_spanned! {f.span=>
+                #name: std::vec::Vec::new(),
+            },
         }
     });
     let builder_ident = &builder_name.builder_ident;
@@ -198,9 +256,11 @@ fn expand_build_method(builder_name: &BuilderName, struct_fields: &StructFields)
                     return std::result::Result::Err("Insufficient field".to_string().into());
                 };
             },
-            FieldType::Option(_, _) => quote_spanned! {f.span=>
-                let #name = &self.#name;
-            },
+            FieldType::Option(_, _) | FieldType::Vec(_, _) | FieldType::VecEach(_, _, _) => {
+                quote_spanned! {f.span=>
+                    let #name = &self.#name;
+                }
+            }
         }
     });
     let fields = struct_fields.fields.iter().map(|f| {
@@ -299,7 +359,10 @@ mod tests {
         let input: DeriveInput = parse_quote! {
             struct Command {
                 executable: String,
+                #[builder(each = "arg")]
+                args: Vec<String>,
                 env: Vec<String>,
+                current_dir: Option<String>
             }
         };
         let builder_name = BuilderName::parse(&input);
@@ -311,7 +374,9 @@ mod tests {
             pub fn builder() -> CommandBuilder {
                 CommandBuilder {
                     executable: std::option::Option::None,
-                    env: std::option::Option::None,
+                    args: std::vec::Vec::new(),
+                    env: std::vec::Vec::new(),
+                    current_dir: std::option::Option::None,
                 }
             }
         };
@@ -324,6 +389,8 @@ mod tests {
         let input: DeriveInput = parse_quote! {
             struct Command {
                 executable: String,
+                #[builder(each = "arg")]
+                args: Vec<String>,
                 env: Vec<String>,
                 current_dir: Option<String>,
             }
@@ -338,12 +405,12 @@ mod tests {
                 let std::option::Option::Some(ref executable) = self.executable else {
                     return std::result::Result::Err("Insufficient field".to_string().into());
                 };
-                let std::option::Option::Some(ref env) = self.env else {
-                    return std::result::Result::Err("Insufficient field".to_string().into());
-                };
+                let args = &self.args;
+                let env = &self.env;
                 let current_dir = &self.current_dir;
                 std::result::Result::Ok(Command {
                     executable: executable.clone(),
+                    args: args.clone(),
                     env: env.clone(),
                     current_dir: current_dir.clone()
                 })
@@ -389,6 +456,41 @@ mod tests {
     }
 
     #[test]
+    fn struct_field_parses_a_vector_field() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub names: Vec<String>
+        };
+
+        let struct_field = StructField::parse(&field)?;
+        assert_eq!(struct_field.name.to_string(), "names");
+        assert_eq!(
+            struct_field.ty.to_token_stream().to_string(),
+            quote!(Vec<String>).to_string()
+        );
+        assert!(matches!(struct_field.ty, FieldType::Vec(_, _)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_parses_a_vector_field_with_a_each_attribute() -> Result<()> {
+        let field: Field = parse_quote! {
+            #[builder(each = "name")]
+            pub names: Vec<String>
+        };
+
+        let struct_field = StructField::parse(&field)?;
+        assert_eq!(struct_field.name.to_string(), "names");
+        assert_eq!(
+            struct_field.ty.to_token_stream().to_string(),
+            quote!(Vec<String>).to_string()
+        );
+        assert!(matches!(struct_field.ty, FieldType::VecEach(_, _, _)));
+
+        Ok(())
+    }
+
+    #[test]
     fn struct_field_generates_a_optional_builder_field() -> Result<()> {
         let field: Field = parse_quote! {
             pub name: String
@@ -405,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_field_generates_optional_builder_field_when_option_type_is_given() -> Result<()> {
+    fn struct_field_generates_a_optional_builder_field_when_option_type_is_given() -> Result<()> {
         let field: Field = parse_quote! {
             pub name: Option<String>
         };
@@ -421,7 +523,40 @@ mod tests {
     }
 
     #[test]
-    fn struct_field_generates_a_setter_method() -> Result<()> {
+    fn struct_field_generates_a_vector_builder_field_when_vec_is_given() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub names: Vec<String>
+        };
+        let expected = quote! {
+            names: std::vec::Vec<String>,
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let builder_field = struct_field.builder_field();
+
+        assert_eq!(builder_field.to_string(), expected.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_vector_builder_field_with_each_name() -> Result<()> {
+        let field: Field = parse_quote! {
+            #[builder(each = "name")]
+            pub names: Vec<String>
+        };
+        let expected = quote! {
+            names: std::vec::Vec<String>,
+        };
+        let struct_field = StructField::parse(&field)?;
+
+        let builder_field = struct_field.builder_field();
+
+        assert_eq!(builder_field.to_string(), expected.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn struct_field_generates_a_setter() -> Result<()> {
         let field: Field = parse_quote! {
             pub name: String
         };
@@ -440,8 +575,8 @@ mod tests {
     }
 
     #[test]
-    fn struct_field_generates_a_setter_method_which_takes_non_optional_type_if_option_type_is_given(
-    ) -> Result<()> {
+    fn struct_field_generates_a_setter_which_takes_a_inner_type_of_the_option_field() -> Result<()>
+    {
         let field: Field = parse_quote! {
             pub name: Option<String>
         };
@@ -460,26 +595,41 @@ mod tests {
     }
 
     #[test]
-    fn field_type_parses_normal_tokens() {
-        let ty: Type = parse_quote! {
-            String
+    fn struct_field_generates_a_setter_which_takes_vec_type_for_vec_field() -> Result<()> {
+        let field: Field = parse_quote! {
+            pub names: Vec<String>
         };
-        let ft = FieldType::parse(&ty);
+        let expected = quote! {
+            pub fn names(&mut self, names: std::vec::Vec<String>) -> &mut Self {
+                self.names = names;
+                self
+            }
+        };
+        let struct_field = StructField::parse(&field)?;
 
-        let token = ft.to_token_stream().to_string();
+        let setter_method = struct_field.setter_method();
 
-        assert_eq!(token, quote!(String).to_string());
+        assert_eq!(setter_method.to_string(), expected.to_string());
+        Ok(())
     }
 
     #[test]
-    fn field_type_parses_option_tokens() {
-        let ty: Type = parse_quote! {
-            Option<String>
+    fn struct_field_generates_a_setter_which_takes_a_inner_type_of_the_vec_field() -> Result<()> {
+        let field: Field = parse_quote! {
+            #[builder(each = "name")]
+            pub names: Vec<String>
         };
-        let ft = FieldType::parse(&ty);
+        let expected = quote! {
+            pub fn name(&mut self, name: String) -> &mut Self {
+                self.names.push(name);
+                self
+            }
+        };
+        let struct_field = StructField::parse(&field)?;
 
-        let token = ft.to_token_stream().to_string();
+        let setter_method = struct_field.setter_method();
 
-        assert_eq!(token, quote!(Option<String>).to_string());
+        assert_eq!(setter_method.to_string(), expected.to_string());
+        Ok(())
     }
 }
